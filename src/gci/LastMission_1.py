@@ -9,7 +9,7 @@ import japanize_matplotlib  # 日本語フォント対応
 from sklearn.preprocessing import LabelEncoder  # カテゴリ変数を数値に変換するエンコーダ
 from sklearn.ensemble import RandomForestClassifier  # ランダムフォレストによる分類器
 from sklearn.model_selection import StratifiedKFold, train_test_split  # 層化K分割交差検証とデータ分割を行うクラス
-from sklearn.metrics import roc_auc_score, accuracy_score  # ROC AUCスコアと精度を計算する評価指標
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, precision_score, recall_score  # ROC AUCスコアと精度を計算する評価指標
 from sklearn.base import clone  # モデルをクローンするための関数
 import xgboost as xgb  # XGBoostライブラリ
 from sklearn.preprocessing import StandardScaler
@@ -89,6 +89,15 @@ dataset['PerformanceRank'] = dataset['PerformanceRating'] + (dataset['JobLevel']
 scaler = StandardScaler()
 dataset['AnnualIncome'] = dataset['MonthlyIncome'] * 12 + dataset['Incentive']
 dataset['AnnualIncome'] = scaler.fit_transform(dataset['AnnualIncome'].values.reshape(-1, 1)).flatten()
+
+# 厚生制度利用率を算出
+#　社内施設・社外施設・長期休暇・フレックスのうち利用しているものの数を数える。
+#　その数を5で割ったものを厚生制度利用率とする。
+dataset['HealthcareUtilization'] = (dataset['InHouseFacility'] + dataset['ExternalFacility'] + dataset['ExtendedLeave'] + dataset['FlexibleWork']) / 4
+
+#　満足度評価指標平均値を算出
+#　満足度評価指標は、JobSatisfaction・EnvironmentSatisfaction・RelationshipSatisfaction・WorkLifeBalanceの平均値とする。
+dataset['SatisfactionScore'] = (dataset['JobSatisfaction'] + dataset['EnvironmentSatisfaction'] + dataset['RelationshipSatisfaction'] + dataset['WorkLifeBalance']) / 4
 
 ## 3. 特徴量選択関数
 
@@ -186,22 +195,24 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
     
     # CVの設定
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=511)
-    
-    # スコア格納用
     cv_scores = []
-    models = []
+    f1_scores = []  # F1スコアを記録するリスト
+    precision_scores = []  # Precisionスコアを記録するリスト
+    recall_scores = []  # Recallスコアを記録するリスト
+    models = []  # モデルを格納するリスト
     
     # 二値分類か多クラス分類かを判定
     is_binary = len(y.unique()) == 2
     
     # Stratified K- Fold による学習と評価
-    for fold, (train_idx, valid_idx) in enumerate(skf.split(X, y)):
-        print(f"Fold {fold + 1}")
+    for fold, (train_idx, valid_idx) in enumerate(skf.split(X, y), 1):
+        print(f"Fold {fold}")
         
+        # 訓練データと検証データに分割
         X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
         y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
         
-        # モデル学習（引数で渡されたモデルをクローンして使用）
+        # モデルをクローンして学習
         model_fold = clone(model)
         model_fold.fit(X_train, y_train)
         models.append(model_fold)
@@ -217,26 +228,38 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
             y_valid_pred = model_fold.predict(X_valid)
             y_valid_pred_proba = model_fold.predict_proba(X_valid)
             
-            # 精度を計算
-            accuracy = accuracy_score(y_valid, y_valid_pred)
-            cv_scores.append(accuracy)
-            print(f"CV  Accuracy: {round(accuracy, 4)}")
+            # F1スコア（マクロ平均）を計算
+            f1_macro = f1_score(y_valid, y_valid_pred, average='macro')
+            f1_scores.append(f1_macro)
+            print(f"CV  F1-Macro: {round(f1_macro, 4)}")
             
-            # AUCも計算（多クラス分類用）
-            try:
-                auc = roc_auc_score(y_valid, y_valid_pred_proba, multi_class='ovr')
-                print(f"CV  AUC: {round(auc, 4)}")
-            except:
-                print(f"CV  AUC: N/A")
-    
+            # Precisionスコア（マクロ平均）を計算
+            precision_macro = precision_score(y_valid, y_valid_pred, average='macro')
+            precision_scores.append(precision_macro)
+            print(f"CV  Precision-Macro: {round(precision_macro, 4)}")
+            
+            # Recallスコア（マクロ平均）を計算
+            recall_macro = recall_score(y_valid, y_valid_pred, average='macro')
+            recall_scores.append(recall_macro)
+            print(f"CV  Recall-Macro: {round(recall_macro, 4)}")
+                
     if is_binary:
         # 平均AUCを表示
         mean_score = np.mean(cv_scores)
         print(f"\nAverage Validation AUC: {round(mean_score, 4)}")
     else:
-        # 平均精度を表示
-        mean_score = np.mean(cv_scores)
-        print(f"\nAverage Validation Accuracy: {round(mean_score, 4)}")
+        
+        # F1スコアの平均も表示（多クラス分類の場合）
+        mean_f1 = np.mean(f1_scores)
+        print(f"Average Validation F1-Macro: {round(mean_f1, 4)}")
+        
+        # Precisionスコアの平均も表示
+        mean_precision = np.mean(precision_scores)
+        print(f"Average Validation Precision-Macro: {round(mean_precision, 4)}")
+        
+        # Recallスコアの平均も表示
+        mean_recall = np.mean(recall_scores)
+        print(f"Average Validation Recall-Macro: {round(mean_recall, 4)}")
     
     return models
 
@@ -323,12 +346,12 @@ print("="*50)
 target = "StressRating"
 
 # kbestによる特徴量選択（Attritionを除外）
-features = select_top_correlated_features(dataset, target, n_features=20, exclude_features=['Attrition'])
+features = select_top_correlated_features(dataset, target, n_features=15, exclude_features=['Attrition'])
 
 # ストレス予測用モデルの設定
 rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
 cat_model = CatBoostClassifier(
-    iterations=100,
+    iterations=50,
     depth=6,
     learning_rate=0.1,
     random_state=511,
