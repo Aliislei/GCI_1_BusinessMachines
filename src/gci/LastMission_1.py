@@ -14,6 +14,10 @@ from sklearn.base import clone  # モデルをクローンするための関数
 import xgboost as xgb  # XGBoostライブラリ
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import SelectKBest, f_classif  # 特徴量選択
+from sklearn.ensemble import VotingClassifier  # アンサンブル用
+from sklearn.linear_model import LogisticRegression  # ロジスティック回帰
+from catboost import CatBoostClassifier  # CatBoost追加
+import lightgbm as lgb  # LightGBM追加
 
 ## 1. データ読み込み
 
@@ -155,7 +159,7 @@ def select_top_correlated_features(dataset, target_column, n_features=20, exclud
 
 ## 4. ベースラインモデル関数
 
-def train_cross_validation_models(dataset, features, target_column, model, n_splits=5):
+def train_cross_validation_models(dataset, features, target_column, model, n_splits=10):
     """
     クロスバリデーションでモデルを訓練し、訓練済みモデルのリストを返す
     
@@ -172,31 +176,25 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
     print(f"\n=== {target_column} 予測モデル訓練開始 ===")
     print(f"使用モデル: {type(model).__name__}")
     
-    # データセットを訓練用とテスト用に分割
+    # データセットの準備
     X = dataset[features]
     y = dataset[target_column]
-    train_X, test_X, train_y, test_y = train_test_split(X, y, test_size=0.2, random_state=511, stratify=y)
     
     print(f"特徴量数: {len(features)}")
-    print(f"訓練データ: {train_X.shape[0]}件, テストデータ: {test_X.shape[0]}件")
+    print(f"データセット: {X.shape[0]}件")
     print(f"目的変数の分布: {dict(y.value_counts().sort_index())}")
-    
-    # クロスバリデーション用のデータ（訓練データ全体を使用）
-    X = train_X
-    y = train_y
     
     # CVの設定
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=511)
     
     # スコア格納用
     cv_scores = []
-    test_pred_list = []
     models = []
     
     # 二値分類か多クラス分類かを判定
     is_binary = len(y.unique()) == 2
     
-    # Stratified K-Fold による学習と評価
+    # Stratified K- Fold による学習と評価
     for fold, (train_idx, valid_idx) in enumerate(skf.split(X, y)):
         print(f"Fold {fold + 1}")
         
@@ -214,12 +212,6 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
             auc = roc_auc_score(y_valid, y_valid_pred_proba)
             cv_scores.append(auc)
             print(f"CV  AUC: {round(auc, 4)}")
-            
-            # テストデータ予測
-            test_pred_proba = model_fold.predict_proba(test_X)[:, 1]
-            test_pred_list.append(test_pred_proba)
-            test_auc = roc_auc_score(test_y, test_pred_proba)
-            print(f"Real AUC: {round(test_auc, 4)}")
         else:
             # 多クラス分類（StressRating）
             y_valid_pred = model_fold.predict(X_valid)
@@ -236,46 +228,15 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
                 print(f"CV  AUC: {round(auc, 4)}")
             except:
                 print(f"CV  AUC: N/A")
-            
-            # テストデータ予測
-            test_pred = model_fold.predict(test_X)
-            test_pred_proba = model_fold.predict_proba(test_X)
-            test_pred_list.append(test_pred)
-            
-            # テストデータでの精度
-            test_accuracy = accuracy_score(test_y, test_pred)
-            print(f"Real Accuracy: {round(test_accuracy, 4)}")
-            
-            # テストデータでのAUC
-            try:
-                test_auc = roc_auc_score(test_y, test_pred_proba, multi_class='ovr')
-                print(f"Real AUC: {round(test_auc, 4)}")
-            except:
-                print(f"Real AUC: N/A")
     
     if is_binary:
         # 平均AUCを表示
         mean_score = np.mean(cv_scores)
         print(f"\nAverage Validation AUC: {round(mean_score, 4)}")
-        
-        # テスト予測の平均を計算
-        test_pred_mean = np.mean(test_pred_list, axis=0)
-        final_auc = roc_auc_score(test_y, test_pred_mean)
-        print(f"Average Real AUC: {round(final_auc, 4)}")
     else:
         # 平均精度を表示
         mean_score = np.mean(cv_scores)
         print(f"\nAverage Validation Accuracy: {round(mean_score, 4)}")
-        
-        # テスト予測のアンサンブル（多数決）
-        test_pred_array = np.array(test_pred_list)
-        test_pred_ensemble = []
-        for i in range(test_pred_array.shape[1]):
-            values, counts = np.unique(test_pred_array[:, i], return_counts=True)
-            test_pred_ensemble.append(values[np.argmax(counts)])
-        
-        ensemble_accuracy = accuracy_score(test_y, test_pred_ensemble)
-        print(f"Ensemble Test Accuracy: {round(ensemble_accuracy, 4)}")
     
     return models
 
@@ -292,29 +253,61 @@ target = "Attrition"
 features = select_top_correlated_features(dataset, target, n_features=25)
 
 # 離職予測用モデルの設定
-attrition_model = xgb.XGBClassifier(
+# XGBoost, RandomForest, CatBoost, LightGBMのアンサンブル
+attrition_rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
+attrition_cat_model = CatBoostClassifier(
+    iterations=100,
+    depth=6,
+    learning_rate=0.1,
+    random_state=511,
+    verbose=0,
+    loss_function='Logloss',
+    eval_metric='Logloss'
+)
+attrition_lgb_model = lgb.LGBMClassifier(
+    n_estimators=100,
+    max_depth=6,
+    learning_rate=0.1,
+    random_state=511,
+    objective='binary',
+    class_weight=None,
+    verbose=-1  # ログ抑制
+)
+attrition_xgb_model = xgb.XGBClassifier(
     n_estimators=100,
     max_depth=6,
     learning_rate=0.1,
     random_state=511,
     eval_metric='logloss'
 )
+attrition_model = VotingClassifier(
+    estimators=[
+        ('xgb', attrition_xgb_model),
+        ('rf', attrition_rf_model),
+        ('cat', attrition_cat_model),
+        ('lgb', attrition_lgb_model)
+    ],
+    voting='soft',
+    n_jobs=-1
+)
 
 # 離職予測モデルを訓練
-attrition_models = train_cross_validation_models(dataset, features, target, attrition_model, n_splits=5)
+attrition_models = train_cross_validation_models(dataset, features, target, attrition_model, n_splits=10)
 
 # 離職予測の特徴量重要度を可視化
-print("\n=== 離職予測の特徴量重要度 ===")
+# VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
+print("\n=== 離職予測の特徴量重要度 (XGBoostのみ) ===")
+attrition_xgb_fitted = attrition_models[-1].named_estimators_["xgb"] if hasattr(attrition_models[-1], "named_estimators_") else attrition_models[-1].estimators_[0]
 attrition_feature_importances = pd.DataFrame({
     'Feature': features,
-    'Importance': attrition_models[-1].feature_importances_
+    'Importance': attrition_xgb_fitted.feature_importances_
 }).sort_values(by='Importance', ascending=False)
 
 print(attrition_feature_importances.head(10))
 
 plt.figure(figsize=(12, 8))
 sns.barplot(data=attrition_feature_importances.head(15), x='Importance', y='Feature')
-plt.title('離職予測 - 特徴量重要度 (Top 15)', fontsize=16)
+plt.title('離職予測 - 特徴量重要度 (Top 15, XGBoost)', fontsize=16)
 plt.xlabel('重要度')
 plt.ylabel('特徴量')
 plt.tight_layout()
@@ -333,7 +326,26 @@ target = "StressRating"
 features = select_top_correlated_features(dataset, target, n_features=20, exclude_features=['Attrition'])
 
 # ストレス予測用モデルの設定
-stress_model = xgb.XGBClassifier(
+rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
+cat_model = CatBoostClassifier(
+    iterations=100,
+    depth=6,
+    learning_rate=0.1,
+    random_state=511,
+    verbose=0,
+    loss_function='MultiClass',
+    eval_metric='MultiClass'
+)
+lgb_model = lgb.LGBMClassifier(
+    n_estimators=100,
+    max_depth=6,
+    learning_rate=0.1,
+    random_state=511,
+    objective='multiclass',
+    class_weight=None,
+    verbose=-1  # ログ抑制
+)
+xgb_model = xgb.XGBClassifier(
     n_estimators=100,
     max_depth=6,
     learning_rate=0.1,
@@ -341,22 +353,34 @@ stress_model = xgb.XGBClassifier(
     eval_metric='mlogloss',  # 多クラス分類用の評価指標
     objective='multi:softprob'  # 多クラス分類用の目的関数
 )
+stress_model = VotingClassifier(
+    estimators=[
+        ('xgb', xgb_model),
+        ('rf', rf_model),
+        ('cat', cat_model),
+        ('lgb', lgb_model)
+    ],
+    voting='soft',
+    n_jobs=-1
+)
 
 # ストレス予測モデルを訓練
-stress_models = train_cross_validation_models(dataset, features, target, stress_model, n_splits=5)
+stress_models = train_cross_validation_models(dataset, features, target, stress_model, n_splits=10)
 
 # ストレス予測の特徴量重要度を可視化
-print("\n=== ストレス予測の特徴量重要度 ===")
+# VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
+print("\n=== ストレス予測の特徴量重要度 (XGBoostのみ) ===")
+xgb_fitted = stress_models[-1].named_estimators_["xgb"] if hasattr(stress_models[-1], "named_estimators_") else stress_models[-1].estimators_[0]
 stress_feature_importances = pd.DataFrame({
     'Feature': features,
-    'Importance': stress_models[-1].feature_importances_
+    'Importance': xgb_fitted.feature_importances_
 }).sort_values(by='Importance', ascending=False)
 
 print(stress_feature_importances.head(10))
 
 plt.figure(figsize=(12, 8))
 sns.barplot(data=stress_feature_importances.head(15), x='Importance', y='Feature')
-plt.title('ストレス予測 - 特徴量重要度 (Top 15)', fontsize=16)
+plt.title('ストレス予測 - 特徴量重要度 (Top 15, XGBoost)', fontsize=16)
 plt.xlabel('重要度')
 plt.ylabel('特徴量')
 plt.tight_layout()
