@@ -19,65 +19,8 @@ from sklearn.linear_model import LogisticRegression  # ロジスティック回�
 from catboost import CatBoostClassifier  # CatBoost追加
 import lightgbm as lgb  # LightGBM追加
 from sklearn.neighbors import NearestNeighbors  # k近傍法
+from imblearn.over_sampling import SMOTE  # SMOTEライブラリ
 
-# SMOTEライクなオーバーサンプリング関数
-def manual_smote(X, y, k_neighbors=5, random_state=511):
-    """
-    手動でSMOTEライクなオーバーサンプリングを実装
-    """
-    np.random.seed(random_state)
-    
-    # クラスごとのサンプル数を取得
-    unique_classes, class_counts = np.unique(y, return_counts=True)
-    max_count = np.max(class_counts)
-    
-    # 結果を格納するリスト
-    X_resampled = []
-    y_resampled = []
-    
-    for class_idx, class_label in enumerate(unique_classes):
-        # 現在のクラスのサンプルを取得
-        class_samples = X[y == class_label]
-        current_count = len(class_samples)
-        
-        # 現在のクラスのサンプルを追加
-        X_resampled.extend(class_samples)
-        y_resampled.extend([class_label] * current_count)
-        
-        # サンプル数が最大クラスより少ない場合、SMOTEでサンプルを生成
-        if current_count < max_count:
-            samples_needed = max_count - current_count
-            
-            # k近傍法で類似サンプルを特定
-            if current_count > k_neighbors:
-                nn = NearestNeighbors(n_neighbors=k_neighbors + 1)
-                nn.fit(class_samples)
-                distances, indices = nn.kneighbors(class_samples)
-                
-                # 新しいサンプルを生成
-                for _ in range(samples_needed):
-                    # ランダムにサンプルを選択
-                    sample_idx = np.random.randint(0, current_count)
-                    # k近傍からランダムに選択（自分以外）
-                    neighbor_idx = np.random.choice(indices[sample_idx][1:])
-                    
-                    # 線形補間で新しいサンプルを生成
-                    alpha = np.random.random()
-                    new_sample = class_samples[sample_idx] + alpha * (class_samples[neighbor_idx] - class_samples[sample_idx])
-                    
-                    X_resampled.append(new_sample)
-                    y_resampled.append(class_label)
-            else:
-                # サンプル数が少ない場合は単純に複製
-                for _ in range(samples_needed):
-                    sample_idx = np.random.randint(0, current_count)
-                    X_resampled.append(class_samples[sample_idx])
-                    y_resampled.append(class_label)
-    
-    return np.array(X_resampled), np.array(y_resampled)
-
-# グローバル変数としてFold10のモデルを保存
-best_stress_model = None
 
 ## 1. データ読み込み
 
@@ -228,9 +171,9 @@ def select_top_correlated_features(dataset, target_column, n_features=20, exclud
 
 ## 4. ベースラインモデル関数
 
-def train_cross_validation_models(dataset, features, target_column, model, n_splits=10):
+def train_cross_validation_models(dataset, features, target_column, model, n_splits=20):
     """
-    クロスバリデーションでモデルを訓練し、訓練済みモデルのリストを返す
+    クロスバリデーションでモデルを訓練し、精度確認後にデータセット全体で学習したモデルを返す
     
     Args:
         dataset (pd.DataFrame): データセット
@@ -240,7 +183,7 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
         n_splits (int): クロスバリデーションの分割数
     
     Returns:
-        list: 訓練済みモデルのリスト
+        model: データセット全体で学習したモデル
     """
     print(f"\n=== {target_column} 予測モデル訓練開始 ===")
     print(f"使用モデル: {type(model).__name__}")
@@ -259,7 +202,6 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
     f1_scores = []  # F1スコアを記録するリスト
     precision_scores = []  # Precisionスコアを記録するリスト
     recall_scores = []  # Recallスコアを記録するリスト
-    models = []  # モデルを格納するリスト
     
     # 二値分類か多クラス分類かを判定
     is_binary = len(y.unique()) == 2
@@ -272,26 +214,9 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
         X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
         y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
         
-        # SMOTEをストレス予測モデル（多クラス分類）のみに適用
-        if not is_binary:  # 多クラス分類（ストレス予測）の場合のみ
-            print(f"Fold {fold} - SMOTE適用前のクラス分布: {dict(y_train.value_counts())}")
-            X_train_resampled, y_train_resampled = manual_smote(X_train.values, y_train.values, k_neighbors=5)
-            print(f"Fold {fold} - SMOTE適用後のクラス分布: {dict(pd.Series(y_train_resampled).value_counts())}")
-            # モデルをクローンして学習
-            model_fold = clone(model)
-            model_fold.fit(X_train_resampled, y_train_resampled)
-        else:  # 二値分類（離職予測）の場合はSMOTEを適用しない
-            # モデルをクローンして学習
-            model_fold = clone(model)
-            model_fold.fit(X_train, y_train)
-        
-        models.append(model_fold)
-        
-        # Fold10のストレス予測モデルを保存（多クラス分類の場合のみ）
-        if not is_binary and fold == 10:
-            global best_stress_model # グローバル変数として定義
-            best_stress_model = model_fold
-            print(f"\n=== Fold10のストレス予測モデルを保存 ===")
+        # モデルをクローンして学習
+        model_fold = clone(model)
+        model_fold.fit(X_train, y_train)
         
         if is_binary:
             # 二値分類（Attrition）
@@ -319,12 +244,12 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
             recall_scores.append(recall_macro)
             print(f"CV  Recall-Macro: {round(recall_macro, 4)}")
                 
+    print(f"\n=== 交差検定による予測精度値 ===")
     if is_binary:
         # 平均AUCを表示
         mean_score = np.mean(cv_scores)
         print(f"\nAverage Validation AUC: {round(mean_score, 4)}")
     else:
-        
         # F1スコアの平均も表示（多クラス分類の場合）
         mean_f1 = np.mean(f1_scores)
         print(f"Average Validation F1-Macro: {round(mean_f1, 4)}")
@@ -337,7 +262,12 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
         mean_recall = np.mean(recall_scores)
         print(f"Average Validation Recall-Macro: {round(mean_recall, 4)}")
     
-    return models
+    # データセット全体でモデルを学習
+    print(f"\n=== データセット全体での最終モデル学習 ===")
+    final_model = clone(model)
+    final_model.fit(X, y)
+    
+    return final_model
 
 ## 5. 離職予測モデル
 
@@ -391,12 +321,12 @@ attrition_model = VotingClassifier(
 )
 
 # 離職予測モデルを訓練
-attrition_models = train_cross_validation_models(dataset, features, target, attrition_model, n_splits=10)
+attrition_models = train_cross_validation_models(dataset, features, target, attrition_model, n_splits=20)
 
 # 離職予測の特徴量重要度を可視化
 # VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
 print("\n=== 離職予測の特徴量重要度 (XGBoostのみ) ===")
-attrition_xgb_fitted = attrition_models[-1].named_estimators_["xgb"] if hasattr(attrition_models[-1], "named_estimators_") else attrition_models[-1].estimators_[0]
+attrition_xgb_fitted = attrition_models.named_estimators_["xgb"] if hasattr(attrition_models, "named_estimators_") else attrition_models.estimators_[0]
 attrition_feature_importances = pd.DataFrame({
     'Feature': features,
     'Importance': attrition_xgb_fitted.feature_importances_
@@ -421,13 +351,27 @@ print("="*50)
 # ストレス予測用の特徴量を指定
 target = "StressRating"
 
-# kbestによる特徴量選択（Attritionを除外）
-features = select_top_correlated_features(dataset, target, n_features=15, exclude_features=['Attrition'])
+# SMOTEによるリサンプリング
+print(f"\n=== ストレス予測用データにSMOTE適用 ===")
+X_for_stress = dataset.drop(columns=[target, 'Attrition'])
+y_for_stress = dataset[target]
+print(f"SMOTE適用前のクラス分布: {dict(y_for_stress.value_counts())}")
+
+smote = SMOTE(random_state=511)
+X_stress_resampled, y_stress_resampled = smote.fit_resample(X_for_stress, y_for_stress)
+print(f"SMOTE適用後のクラス分布: {dict(pd.Series(y_stress_resampled).value_counts())}")
+
+# リサンプリングされたデータでデータセットを再構築
+dataset_stress_resampled = pd.DataFrame(X_stress_resampled, columns=X_for_stress.columns)
+dataset_stress_resampled[target] = y_stress_resampled
+
+# kbestによる特徴量選択（リサンプリングされたデータセットを使用）
+features = select_top_correlated_features(dataset_stress_resampled, target, n_features=15, exclude_features=['Attrition'])
 
 # ストレス予測用モデルの設定
 rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
 cat_model = CatBoostClassifier(
-    iterations=50,
+    iterations=100,
     depth=6,
     learning_rate=0.1,
     random_state=511,
@@ -464,12 +408,12 @@ stress_model = VotingClassifier(
 )
 
 # ストレス予測モデルを訓練
-stress_models = train_cross_validation_models(dataset, features, target, stress_model, n_splits=10)
+stress_models = train_cross_validation_models(dataset_stress_resampled, features, target, stress_model, n_splits=20)
 
 # ストレス予測の特徴量重要度を可視化
 # VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
 print("\n=== ストレス予測の特徴量重要度 (XGBoostのみ) ===")
-xgb_fitted = stress_models[-1].named_estimators_["xgb"] if hasattr(stress_models[-1], "named_estimators_") else stress_models[-1].estimators_[0]
+xgb_fitted = stress_models.named_estimators_["xgb"] if hasattr(stress_models, "named_estimators_") else stress_models.estimators_[0]
 stress_feature_importances = pd.DataFrame({
     'Feature': features,
     'Importance': xgb_fitted.feature_importances_
@@ -490,58 +434,6 @@ plt.show()
 
 print("\n分析完了！")
 
-# Fold10のストレス予測モデルを元のデータセット全体に適用
-if best_stress_model: # グローバル変数を使用
-    print("\n" + "="*50)
-    print("Fold10モデルの全体データセット評価")
-    print("="*50)
-    
-    # 元のデータセットで予測
-    X_full = dataset[features]
-    y_true = dataset[target]
-    
-    # 予測実行
-    y_pred = best_stress_model.predict(X_full)
-    y_pred_proba = best_stress_model.predict_proba(X_full)
-    
-    # 各種評価指標を算出
-    accuracy = accuracy_score(y_true, y_pred)
-    f1_macro = f1_score(y_true, y_pred, average='macro')
-    precision_macro = precision_score(y_true, y_pred, average='macro')
-    recall_macro = recall_score(y_true, y_pred, average='macro')
-    
-    # AUC（多クラス分類用）
-    try:
-        auc = roc_auc_score(y_true, y_pred_proba, multi_class='ovr')
-    except:
-        auc = "N/A"
-    
-    print(f"=== Fold10モデルの全体データセット評価結果 ===")
-    print(f"Accuracy: {accuracy:.4f}")
-    print(f"F1-Macro: {f1_macro:.4f}")
-    print(f"Precision-Macro: {precision_macro:.4f}")
-    print(f"Recall-Macro: {recall_macro:.4f}")
-    print(f"AUC: {auc}")
-    
-    # クラス別の詳細評価
-    print(f"\n=== クラス別詳細評価 ===")
-    for class_label in sorted(y_true.unique()):
-        class_mask = (y_true == class_label)
-        class_accuracy = accuracy_score(y_true[class_mask], y_pred[class_mask])
-        class_f1 = f1_score(y_true, y_pred, average=None)[class_label]
-        class_precision = precision_score(y_true, y_pred, average=None)[class_label]
-        class_recall = recall_score(y_true, y_pred, average=None)[class_label]
-        
-        print(f"クラス {class_label}:")
-        print(f"  サンプル数: {sum(class_mask)}")
-        print(f"  正解数: {sum((y_true == class_label) & (y_pred == class_label))}")
-        print(f"  精度: {class_accuracy:.4f}")
-        print(f"  F1: {class_f1:.4f}")
-        print(f"  Precision: {class_precision:.4f}")
-        print(f"  Recall: {class_recall:.4f}")
-        print()
-
-print("分析完了！")
 
 
 
