@@ -171,7 +171,7 @@ def select_top_correlated_features(dataset, target_column, n_features=20, exclud
 
 ## 4. ベースラインモデル関数
 
-def train_cross_validation_models(dataset, features, target_column, model, n_splits=20):
+def train_cross_validation_models(dataset, features, target_column, model, n_splits=10):
     """
     クロスバリデーションでモデルを訓練し、精度確認後にデータセット全体で学習したモデルを返す
     
@@ -196,6 +196,13 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
     print(f"データセット: {X.shape[0]}件")
     print(f"目的変数の分布: {dict(y.value_counts().sort_index())}")
     
+    # ホールドアウトデータを確保
+    X_train_cv, X_holdout, y_train_cv, y_holdout = train_test_split(
+        X, y, test_size=0.2, stratify=y, shuffle=True, random_state=511
+    )
+    print(f"CV用データ: {X_train_cv.shape[0]}件")
+    print(f"ホールドアウトデータ: {X_holdout.shape[0]}件")
+    
     # CVの設定
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=511)
     cv_scores = []
@@ -207,12 +214,12 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
     is_binary = len(y.unique()) == 2
     
     # Stratified K- Fold による学習と評価
-    for fold, (train_idx, valid_idx) in enumerate(skf.split(X, y), 1):
+    for fold, (train_idx, valid_idx) in enumerate(skf.split(X_train_cv, y_train_cv), 1):
         print(f"Fold {fold}")
         
         # 訓練データと検証データに分割
-        X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
-        y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
+        X_train, X_valid = X_train_cv.iloc[train_idx], X_train_cv.iloc[valid_idx]
+        y_train, y_valid = y_train_cv.iloc[train_idx], y_train_cv.iloc[valid_idx]
         
         # モデルをクローンして学習
         model_fold = clone(model)
@@ -244,28 +251,43 @@ def train_cross_validation_models(dataset, features, target_column, model, n_spl
             recall_scores.append(recall_macro)
             print(f"CV  Recall-Macro: {round(recall_macro, 4)}")
                 
-    print(f"\n=== 交差検定による予測精度値 ===")
-    if is_binary:
-        # 平均AUCを表示
-        mean_score = np.mean(cv_scores)
-        print(f"\nAverage Validation AUC: {round(mean_score, 4)}")
-    else:
-        # F1スコアの平均も表示（多クラス分類の場合）
-        mean_f1 = np.mean(f1_scores)
-        print(f"Average Validation F1-Macro: {round(mean_f1, 4)}")
-        
-        # Precisionスコアの平均も表示
-        mean_precision = np.mean(precision_scores)
-        print(f"Average Validation Precision-Macro: {round(mean_precision, 4)}")
-        
-        # Recallスコアの平均も表示
-        mean_recall = np.mean(recall_scores)
-        print(f"Average Validation Recall-Macro: {round(mean_recall, 4)}")
-    
     # データセット全体でモデルを学習
     print(f"\n=== データセット全体での最終モデル学習 ===")
     final_model = clone(model)
-    final_model.fit(X, y)
+    final_model.fit(X_train_cv, y_train_cv)
+
+    print(f"\n=== 予測精度値 ===")
+    if is_binary:
+        # CV平均AUCを表示
+        mean_score = np.mean(cv_scores)
+        print(f"Average Validation AUC: {round(mean_score, 4)}")
+        
+        # ホールドアウトデータでの評価
+        y_holdout_pred_proba = final_model.predict_proba(X_holdout)[:, 1]
+        holdout_auc = roc_auc_score(y_holdout, y_holdout_pred_proba)
+        print(f"Holdout AUC: {round(holdout_auc, 4)}")
+    else:
+        # VV F1スコアの平均も表示（多クラス分類の場合）
+        mean_f1 = np.mean(f1_scores)
+        print(f"Average Validation F1-Macro: {round(mean_f1, 4)}")
+        
+        # CV Precisionスコアの平均も表示
+        mean_precision = np.mean(precision_scores)
+        print(f"Average Validation Precision-Macro: {round(mean_precision, 4)}")
+        
+        # CV Recallスコアの平均も表示
+        mean_recall = np.mean(recall_scores)
+        print(f"Average Validation Recall-Macro: {round(mean_recall, 4)}")
+        
+        # ホールドアウトデータでの評価
+        y_holdout_pred = final_model.predict(X_holdout)
+        holdout_f1 = f1_score(y_holdout, y_holdout_pred, average='macro')
+        holdout_precision = precision_score(y_holdout, y_holdout_pred, average='macro')
+        holdout_recall = recall_score(y_holdout, y_holdout_pred, average='macro')
+        print(f"Holdout F1-Macro: {round(holdout_f1, 4)}")
+        print(f"Holdout Precision-Macro: {round(holdout_precision, 4)}")
+        print(f"Holdout Recall-Macro: {round(holdout_recall, 4)}")
+    
     
     return final_model
 
@@ -282,7 +304,6 @@ target = "Attrition"
 features = select_top_correlated_features(dataset, target, n_features=25)
 
 # 離職予測用モデルの設定
-# XGBoost, RandomForest, CatBoost, LightGBMのアンサンブル
 attrition_rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
 attrition_cat_model = CatBoostClassifier(
     iterations=100,
@@ -321,7 +342,7 @@ attrition_model = VotingClassifier(
 )
 
 # 離職予測モデルを訓練
-attrition_models = train_cross_validation_models(dataset, features, target, attrition_model, n_splits=20)
+attrition_models = train_cross_validation_models(dataset, features, target, attrition_model)
 
 # 離職予測の特徴量重要度を可視化
 # VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
@@ -340,6 +361,7 @@ plt.title('離職予測 - 特徴量重要度 (Top 15, XGBoost)', fontsize=16)
 plt.xlabel('重要度')
 plt.ylabel('特徴量')
 plt.tight_layout()
+plt.savefig('src/attrition_feature_importances.png', dpi=300, bbox_inches='tight')
 plt.show()
 
 ## 6. ストレス予測モデル
@@ -369,6 +391,7 @@ dataset_stress_resampled[target] = y_stress_resampled
 features = select_top_correlated_features(dataset_stress_resampled, target, n_features=15, exclude_features=['Attrition'])
 
 # ストレス予測用モデルの設定
+#　TODO:離職モデルとは構成を変えた方が良い？そもそも多クラス分類と回帰どちらが良い？
 rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
 cat_model = CatBoostClassifier(
     iterations=100,
@@ -408,7 +431,7 @@ stress_model = VotingClassifier(
 )
 
 # ストレス予測モデルを訓練
-stress_models = train_cross_validation_models(dataset_stress_resampled, features, target, stress_model, n_splits=20)
+stress_models = train_cross_validation_models(dataset_stress_resampled, features, target, stress_model)
 
 # ストレス予測の特徴量重要度を可視化
 # VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
@@ -427,9 +450,17 @@ plt.title('ストレス予測 - 特徴量重要度 (Top 15, XGBoost)', fontsize=
 plt.xlabel('重要度')
 plt.ylabel('特徴量')
 plt.tight_layout()
+plt.savefig('src/stress_feature_importances.png', dpi=300, bbox_inches='tight')
 plt.show()
 
-## 7. 結果比較
+## 7. 打ち手の分析
+### 7-1 福利厚生推進によるストレスレベル低下確認
+#　1. ストレス予測モデルで福利厚生推進効果による燃え尽き防止を確認
+#  - 全体的な利用フラグをランダムに一定割合以上に設定（60%・70%・80%で比較）
+#  - 但し一定パフォーマンス（PerformanceIndex:80）以上の社員は長期休暇支給制度は必ず１に設定
+#　データセットを加工する
+df_welfare_promotion = dataset.copy()
+
 
 
 print("\n分析完了！")
