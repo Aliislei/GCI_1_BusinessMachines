@@ -301,7 +301,7 @@ print("="*50)
 target = "Attrition"
 
 # kbestによる特徴量選択
-attrition_features = select_top_correlated_features(dataset, target, n_features=25)
+features = select_top_correlated_features(dataset, target, n_features=25)
 
 # 離職予測用モデルの設定
 attrition_rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=511)
@@ -342,14 +342,14 @@ attrition_model = VotingClassifier(
 )
 
 # 離職予測モデルを訓練
-attrition_models = train_cross_validation_models(dataset, attrition_features, target, attrition_model)
+attrition_models = train_cross_validation_models(dataset, features, target, attrition_model)
 
 # 離職予測の特徴量重要度を可視化
 # VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
 print("\n=== 離職予測の特徴量重要度 (XGBoostのみ) ===")
 attrition_xgb_fitted = attrition_models.named_estimators_["xgb"] if hasattr(attrition_models, "named_estimators_") else attrition_models.estimators_[0]
 attrition_feature_importances = pd.DataFrame({
-    'Feature': attrition_features,
+    'Feature': features,
     'Importance': attrition_xgb_fitted.feature_importances_
 }).sort_values(by='Importance', ascending=False)
 
@@ -388,7 +388,7 @@ dataset_stress_resampled = pd.DataFrame(X_stress_resampled, columns=X_for_stress
 dataset_stress_resampled[target] = y_stress_resampled
 
 # kbestによる特徴量選択（リサンプリングされたデータセットを使用）
-stress_features = select_top_correlated_features(dataset_stress_resampled, target, n_features=15, exclude_features=['Attrition'])
+features = select_top_correlated_features(dataset_stress_resampled, target, n_features=15, exclude_features=['Attrition'])
 
 # ストレス予測用モデルの設定
 #　TODO:離職モデルとは構成を変えた方が良い？そもそも多クラス分類と回帰どちらが良い？
@@ -431,14 +431,14 @@ stress_model = VotingClassifier(
 )
 
 # ストレス予測モデルを訓練
-stress_models = train_cross_validation_models(dataset_stress_resampled, stress_features, target, stress_model)
+stress_models = train_cross_validation_models(dataset_stress_resampled, features, target, stress_model)
 
 # ストレス予測の特徴量重要度を可視化
 # VotingClassifierはfeature_importances_を持たないため、XGBoostの重要度を表示
 print("\n=== ストレス予測の特徴量重要度 (XGBoostのみ) ===")
 xgb_fitted = stress_models.named_estimators_["xgb"] if hasattr(stress_models, "named_estimators_") else stress_models.estimators_[0]
 stress_feature_importances = pd.DataFrame({
-    'Feature': stress_features,
+    'Feature': features,
     'Importance': xgb_fitted.feature_importances_
 }).sort_values(by='Importance', ascending=False)
 
@@ -455,265 +455,12 @@ plt.show()
 
 ## 7. 打ち手の分析
 ### 7-1 福利厚生推進によるストレスレベル低下確認
-print("\n" + "="*50)
-print("福利厚生推進施策の検証用データセット作成")
-print("="*50)
-
-# 1. 一定パフォーマンス（PerformanceIndex:80）以上の社員への長期休暇支給制度（必ず利用）
-# 2. 一定パフォーマンス以上かつストレスレベル４・５の社員への福利厚生設備およびフレックス制度の適用
-
-# 元データセットをコピー
+#　1. ストレス予測モデルで福利厚生推進効果による燃え尽き防止を確認
+#  - 全体的な利用フラグをランダムに一定割合以上に設定（60%・70%・80%で比較）
+#  - 但し一定パフォーマンス（PerformanceIndex:80）以上の社員は長期休暇支給制度は必ず１に設定
+#　データセットを加工する
 df_welfare_promotion = dataset.copy()
 
-# 施策適用前にストレス値/離職率を予測モデルベースに変更
-df_welfare_promotion['StressRating'] = stress_models.predict(df_welfare_promotion[stress_features])
-df_welfare_promotion['Attrition'] = attrition_models.predict(df_welfare_promotion[attrition_features])
-
-# 施策適用前の状況確認
-print("\n=== 施策適用前の状況 ===")
-print(f"全体離職率: {df_welfare_promotion['Attrition'].mean():.3f} ({df_welfare_promotion['Attrition'].sum()}名)")
-print(f"PerformanceIndex >= 80の社員数: {(df_welfare_promotion['PerformanceIndex'] >= 80).sum()}名")
-print(f"PerformanceIndex >= 80の社員の離職率: {df_welfare_promotion[df_welfare_promotion['PerformanceIndex'] >= 80]['Attrition'].mean():.3f} ({df_welfare_promotion[df_welfare_promotion['PerformanceIndex'] >= 80]['Attrition'].sum()}名)")
-print(f"PerformanceIndex >= 80 かつ StressRating >= 3の社員数: {((df_welfare_promotion['PerformanceIndex'] >= 80) & (df_welfare_promotion['StressRating'] >= 3)).sum()}名")
-
-#　静かな退職群のパフォーマンス平均値確認
-#　静かな退職条件：退職していない・ストレスレベルが０or1・パフォーマンスが下位25%・ワークライフバランスが3以上
-quiet_retirement_mask = (df_welfare_promotion['Attrition'] == 0) & (df_welfare_promotion['StressRating'] <= 1) & (df_welfare_promotion['PerformanceIndex'] <= df_welfare_promotion['PerformanceIndex'].quantile(0.25)) & (df_welfare_promotion['WorkLifeBalance'] >= 3)
-quiet_retirement_performance_mean = df_welfare_promotion[quiet_retirement_mask]['PerformanceIndex'].mean()
-print(f"静かな退職群のパフォーマンス平均値: {quiet_retirement_performance_mean:.2f}")
-
-total_performance_sum = df_welfare_promotion[df_welfare_promotion['Attrition'] == 0]['PerformanceIndex'].sum()
-
-#　施策実施前のパフォーマンス低下予測
-df_performance_calc = df_welfare_promotion.copy()
-# 高ストレス社員はいずれ静かな退職状態に移行すると仮定する
-#　退職していない高ストレス社員のパフォーマンスは静かな退職群のパフォーマンス平均値となる
-df_performance_calc.loc[(df_performance_calc['StressRating'] >= 3)&(df_performance_calc['Attrition'] == 0)&(df_performance_calc['PerformanceIndex'] >= quiet_retirement_performance_mean), 'PerformanceIndex'] = quiet_retirement_performance_mean
-# 実際に退職した社員のパフォーマンスは失われる
-df_performance_calc.loc[df_performance_calc['Attrition'] == 1, 'PerformanceIndex'] = 0
-performance_index_reduce_before = total_performance_sum - df_performance_calc['PerformanceIndex'].sum()
-print(f"施策実施前のパフォーマンス損失: {performance_index_reduce_before}")
-
-
-
-# ストレスレベル別の社員数
-print("\nストレスレベル別の社員数:")
-for stress_level in range(5):  # 0-4の5レベル
-    count = (df_welfare_promotion['StressRating'] == stress_level).sum()
-    percentage = (count / len(df_welfare_promotion)) * 100
-    print(f"  StressRating {stress_level}: {count}名 ({percentage:.1f}%)")
-
-# 施策1: 一定パフォーマンス（PerformanceIndex:80）以上の社員への長期休暇支給制度（必ず利用）
-high_performance_mask = df_welfare_promotion['PerformanceIndex'] >= 80
-df_welfare_promotion.loc[high_performance_mask, 'ExtendedLeave'] = 1
-
-print(f"\n施策1適用: PerformanceIndex >= 80の社員{high_performance_mask.sum()}名に長期休暇制度を強制適用")
-
-# 施策2: 一定パフォーマンス以上かつストレスレベル４・５の社員への福利厚生設備およびフレックス制度の適用（必ず利用）
-# StressRatingは0ベースに変換されているため、元の4・5は3・4に相当
-high_performance_high_stress_mask = (df_welfare_promotion['PerformanceIndex'] >= 80) & (df_welfare_promotion['StressRating'] >= 3)
-#　InHouseは利用しやすい。
-df_welfare_promotion.loc[high_performance_high_stress_mask, 'InHouseFacility'] = 1
-#　外部施設は利用率向上の難易度が高い
-# 非利用者の3割を利用に転換できれば上々と考える。元々1ならそのまま、0なら30%の確率で1に変更
-np.random.seed(511)
-for index in df_welfare_promotion.index:
-    if high_performance_high_stress_mask[index] and df_welfare_promotion.loc[index, 'ExternalFacility'] == 0:
-        if np.random.random() < 0.3:
-            df_welfare_promotion.loc[index, 'ExternalFacility'] = 1
-#　フレックスは活用推奨しやすい。全員活用で。
-df_welfare_promotion.loc[high_performance_high_stress_mask, 'FlexibleWork'] = 1
-
-print(f"施策2適用: PerformanceIndex >= 80 かつ StressRating >= 3の社員{high_performance_high_stress_mask.sum()}名に福利厚生設備・フレックス制度を強制適用")
-
-# 施策適用後の状況確認
-print("\n=== 施策適用後の状況 ===")
-print(f"長期休暇制度利用率: {df_welfare_promotion['ExtendedLeave'].mean():.3f} ({df_welfare_promotion['ExtendedLeave'].sum()}名)")
-print(f"社内施設利用率: {df_welfare_promotion['InHouseFacility'].mean():.3f} ({df_welfare_promotion['InHouseFacility'].sum()}名)")
-print(f"外部施設利用率: {df_welfare_promotion['ExternalFacility'].mean():.3f} ({df_welfare_promotion['ExternalFacility'].sum()}名)")
-print(f"フレックス制度利用率: {df_welfare_promotion['FlexibleWork'].mean():.3f} ({df_welfare_promotion['FlexibleWork'].sum()}名)")
-
-# 厚生制度利用率を再計算
-df_welfare_promotion['HealthcareUtilization'] = (df_welfare_promotion['InHouseFacility'] + 
-                                                 df_welfare_promotion['ExternalFacility'] + 
-                                                 df_welfare_promotion['ExtendedLeave'] + 
-                                                 df_welfare_promotion['FlexibleWork']) / 4
-
-print(f"厚生制度利用率（平均）: {df_welfare_promotion['HealthcareUtilization'].mean():.3f}")
-
-# 施策適用対象者の詳細確認
-print("\n=== 施策適用対象者の詳細 ===")
-target_employees = df_welfare_promotion[high_performance_high_stress_mask]
-print(f"施策2適用対象者数: {len(target_employees)}名")
-if len(target_employees) > 0:
-    print(f"対象者の平均PerformanceIndex: {target_employees['PerformanceIndex'].mean():.2f}")
-    print(f"対象者の平均StressRating: {target_employees['StressRating'].mean():.2f}")
-    print(f"対象者の部署分布:")
-    print(target_employees['Department'].value_counts())
-
-print("\n検証用データセット作成完了！")
-print(f"作成されたデータセット: {df_welfare_promotion.shape}")
-
-###  ストレス予測モデルによるストレス値再算定
-print("\n" + "="*50)
-print("ストレス予測モデルによるストレス値再算定")
-print("="*50)
-
-# 検証用データセットからストレス予測に必要な特徴量を準備
-# ストレス予測モデルで使用した特徴量のみを抽出
-X_welfare_for_stress = df_welfare_promotion[stress_features]
-
-# ストレス予測モデルで新しいストレス値を予測
-print("\n=== ストレス予測モデルによる再予測 ===")
-stress_predictions = stress_models.predict(X_welfare_for_stress)
-
-# 予測結果をデータセットに追加
-df_welfare_promotion['StressRating_Original'] = df_welfare_promotion['StressRating'].copy()
-df_welfare_promotion['StressRating'] = stress_predictions
-
-print(f"ストレス予測完了: {len(stress_predictions)}件")
-
-# 再算定後のストレスレベル別の社員数
-print("\n=== 再算定後のストレスレベル別の社員数 ===")
-for stress_level in range(5):  # 0-4の5レベル
-    count = (df_welfare_promotion['StressRating'] == stress_level).sum()
-    percentage = (count / len(df_welfare_promotion)) * 100
-    print(f"  StressRating {stress_level}: {count}名 ({percentage:.1f}%)")
-
-# 施策適用対象者のストレス変化
-print("\n=== 施策適用対象者のストレス変化 ===")
-target_employees_after = df_welfare_promotion[high_performance_high_stress_mask]
-if len(target_employees_after) > 0:
-    target_original_mean = target_employees_after['StressRating_Original'].mean()
-    target_predicted_mean = target_employees_after['StressRating'].mean()
-    print(f"施策2適用対象者の平均ストレスレベル: {target_original_mean:.3f} → {target_predicted_mean:.3f} (変化: {target_predicted_mean - target_original_mean:+.3f})")
-
-
-print("\nストレス値再算定完了！")
-
-### 7-4 施策対象者のストレスレベル分布変化の可視化
-print("\n" + "="*50)
-print("施策対象者のストレスレベル分布変化の可視化")
-print("="*50)
-
-# 施策対象者のストレスレベル分布を取得
-target_employees_1 = df_welfare_promotion[high_performance_high_stress_mask]
-
-# 施策前後のストレスレベル分布を集計
-stress_before = target_employees_1['StressRating_Original'].value_counts().sort_index()
-stress_after = target_employees_1['StressRating'].value_counts().sort_index()
-
-# 全てのストレスレベル（0-4）を含むように調整
-all_levels = range(5)
-stress_before_full = pd.Series(0, index=all_levels)
-stress_after_full = pd.Series(0, index=all_levels)
-
-for level in all_levels:
-    if level in stress_before.index:
-        stress_before_full[level] = stress_before[level]
-    if level in stress_after.index:
-        stress_after_full[level] = stress_after[level]
-
-# 可視化
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-# 施策前の分布
-bars1 = ax1.bar(stress_before_full.index, stress_before_full.values, color='lightcoral', alpha=0.7)
-ax1.set_title('施策前のストレスレベル分布', fontsize=14, fontweight='bold')
-ax1.set_xlabel('ストレスレベル')
-ax1.set_ylabel('社員数')
-ax1.set_xticks(range(5))
-ax1.set_ylim(0, max(stress_before_full.max(), stress_after_full.max()) + 2)
-
-# バーの上に数値を表示
-for bar, value in zip(bars1, stress_before_full.values):
-    if value > 0:
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
-                str(int(value)), ha='center', va='bottom', fontweight='bold')
-
-# 施策後の分布
-bars2 = ax2.bar(stress_after_full.index, stress_after_full.values, color='lightgreen', alpha=0.7)
-ax2.set_title('施策後のストレスレベル分布', fontsize=14, fontweight='bold')
-ax2.set_xlabel('ストレスレベル')
-ax2.set_ylabel('社員数')
-ax2.set_xticks(range(5))
-ax2.set_ylim(0, max(stress_before_full.max(), stress_after_full.max()) + 2)
-
-# バーの上に数値を表示
-for bar, value in zip(bars2, stress_after_full.values):
-    if value > 0:
-        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
-                str(int(value)), ha='center', va='bottom', fontweight='bold')
-
-plt.tight_layout()
-plt.savefig('src/policy_target_stress_distribution_change.png', dpi=300, bbox_inches='tight')
-plt.show()
-
-#　7−2　福利厚生推進の結果、離職率はどう変動するか
-df_welfare_attrition = df_welfare_promotion.copy()
-df_welfare_attrition['Attrition'] = attrition_models.predict(df_welfare_attrition[attrition_features])
-print(f"施策後 離職率: {df_welfare_attrition['Attrition'].mean():.3f} ({df_welfare_attrition['Attrition'].sum()}名)")
-print(f"施策後 PerformanceIndex >= 80の社員の離職率: {df_welfare_attrition[df_welfare_promotion['PerformanceIndex'] >= 80]['Attrition'].mean():.3f} ({df_welfare_attrition[df_welfare_attrition['PerformanceIndex'] >= 80]['Attrition'].sum()}名)")
-
-#　インセンティブ施策は有意な効果が得られなかった。却下する
-"""
-#　７−3　インセンティブ制度変更
-#　df_welfare_attritionをベースに、インセンティブを再配分したデータセットを作成する
-#　現状のインセンティブ総和を確認
-incentive_total = df_welfare_attrition['Incentive'].sum()
-print(f"現状のインセンティブ総和: {incentive_total}")
-
-#　インセンティブをPerformanceIndex80以上の社員にPerformanceIndex比例で再配分
-#　PerformanceIndexが80以上の社員のPerformanceIndexの合計を計算
-performance_index_total = df_welfare_attrition[df_welfare_attrition['PerformanceIndex'] >= 80]['PerformanceIndex'].sum()
-print(f"PerformanceIndexが80以上の社員のPerformanceIndexの合計: {performance_index_total}")
-#　インセンティブをPerformanceIndex比例で再配分（80以上の社員のみ）
-df_welfare_attrition['Incentive_Original'] = df_welfare_attrition['Incentive'].copy()
-df_welfare_attrition['Incentive'] = 0
-df_welfare_attrition.loc[df_welfare_attrition['PerformanceIndex'] >= 80, 'Incentive'] = performance_index_total * df_welfare_attrition['PerformanceIndex'] / performance_index_total
-
-#　インセンティブ総和を確認
-incentive_total_after = df_welfare_attrition['Incentive'].sum()
-print(f"施策後のインセンティブ総和: {incentive_total_after}")
-
-#　ストレスおよび退職率率の変化を確認
-df_welfare_attrition['StressRating_Original'] = df_welfare_attrition['StressRating'].copy()
-df_welfare_attrition['StressRating'] = stress_models.predict(df_welfare_attrition[stress_features])
-df_welfare_attrition['Attrition_Original'] = df_welfare_attrition['Attrition'].copy()
-df_welfare_attrition['Attrition'] = attrition_models.predict(df_welfare_attrition[attrition_features])
-
-print(f"インセンティブ施策後 離職率: {df_welfare_attrition['Attrition'].mean():.3f} ({df_welfare_attrition['Attrition'].sum()}名)")
-print(f"インセンティブ施策後 PerformanceIndex >= 80の社員の離職率: {df_welfare_attrition[df_welfare_attrition['PerformanceIndex'] >= 80]['Attrition'].mean():.3f} ({df_welfare_attrition[df_welfare_attrition['PerformanceIndex'] >= 80]['Attrition'].sum()}名)")
-"""
-
-#　8　総合効果確認
-# 高ストレス社員はいずれ静かな退職状態に移行すると仮定する
-#　退職していない高ストレス社員のパフォーマンスは静かな退職群のパフォーマンス平均値となる
-df_welfare_promotion.loc[(df_welfare_promotion['StressRating'] >= 3)&(df_welfare_promotion['Attrition'] == 0)&(df_welfare_promotion['PerformanceIndex'] >= quiet_retirement_performance_mean), 'PerformanceIndex'] = quiet_retirement_performance_mean
-# 実際に退職した社員のパフォーマンスは失われる
-df_welfare_promotion.loc[df_welfare_promotion['Attrition'] == 1, 'PerformanceIndex'] = 0
-# 施策実施後のパフォーマンス総和をとる
-performance_index_reduce_after = total_performance_sum - df_welfare_promotion['PerformanceIndex'].sum()
-print(f"施策実施後のパフォーマンス損失: {performance_index_reduce_after}")
-
-# 施策実施後のパフォーマンス総和の変化率をとる
-performance_index_reduce_change_rate = (performance_index_reduce_after - performance_index_reduce_before) / performance_index_reduce_before
-print(f"施策実施後のパフォーマンス損失の変化率: {performance_index_reduce_change_rate:.2f}")
-
-#　全社パフォーマンスの変化率をとる
-performance_index_total_change_rate = (performance_index_reduce_after - performance_index_reduce_before) / total_performance_sum
-print(f"施策実施後の全社パフォーマンスの変化率: {performance_index_total_change_rate:.2f}")
-# 日本IBM：2023/01-12月期決算の売上高７３０９億円
-print(f"施策実施後の全社売上高上昇: {round(-1*performance_index_total_change_rate*7309, 4):.2f}億円")
-
-
-########################
-#　資料ではこの先で&DおよびSalesへの社内募集施策提案を行う。
-#　・福利厚生施策の結果若干の工数不足が見込まれる。
-#　・そもそも若干の業務過多であったと考えられる
-#　・理論上業務量調整もし退職＆静かな退職の防止につながる
-#　・理論上自発的業務参画が退職および静かな退職の防止につながる
-########################
 
 
 print("\n分析完了！")
